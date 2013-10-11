@@ -1,0 +1,207 @@
+my.impute = function(data, id, ..., sep = "_", no.negs = TRUE, neg.replace = 0)
+{
+  ####Subset variables to impute
+
+  #Attach data so ... can be read
+  attach(data) 
+
+  #Passes ... as is to the function
+  vars = data.frame(...) 
+
+  #Detach the data
+  detach(data) 
+
+  #Specify the names of the subjects (id)
+  names = as.character(data[,id])
+
+  #If no variables are specified, every variable (save id) is checked to be imputed
+  if(nrow(vars) == 0) vars = data[,!(names(data) %in% id)]
+
+  #If there are no missing values, we can't impute anything!
+  if(sum(is.na(vars)) == 0) 
+  {
+    warning("There are no missing values to impute! Returning original data. Please specify variables with missing values.", call. = FALSE, immediate. = TRUE)
+    return(data)
+  }
+	
+	
+  ####Format the data (stacked)
+
+  #Get the variable names (for imputation)
+  names.vars = names(vars) 
+	
+  #Set the first variable
+  my.data = data.frame(V1 = names, V2 = names.vars[1], V3 = vars[,1]) 
+
+  #Stack all the others
+  for(i in 2:ncol(vars))
+  {
+    d = data.frame(V1 = names, V2 = names.vars[i], V3 = vars[,i])
+    my.data = rbind(my.data, d)
+  }
+
+  #Add cross-reference variable names
+  t = paste(id, my.data[,1], my.data[,2], sep = sep)
+  my.data = data.frame(my.data, t)
+
+  #Name the columns
+  names(my.data) = c(id, "Variable", "Value", "Name")
+
+
+  ####Subset the stacked data by completes/incompletes
+
+  #Names must be character or it might get messy
+  Name = as.character(my.data$Name) 
+
+  #Get uniques for setdiff
+  name.set = unique(Name) 
+
+  #Those with NAs in at least 1 obs are here
+  incomplete.set = as.character(unique(Name[is.na(my.data$Value)])) 
+
+  #The rest are here
+  complete.set = as.character(setdiff(name.set, incomplete.set)) 
+
+  #Put the data into lists
+  new.incomplete = new.complete = list()
+  for(i in as.character(incomplete.set))
+    new.incomplete[[i]] = my.data[Name %in% i,3]
+  for(i in as.character(complete.set))
+    new.complete[[i]] = my.data[Name %in% i,3]
+
+
+  ####Run the (linear) regressions to be used in imputation
+
+  #The regressions. This is the heavy lifting!
+  mod = lapply(new.incomplete, function(y) 
+  lapply(new.complete, function(x) lm(y ~ x)))
+
+
+  ####Subset the models by largest R^2
+
+  #Extract all the R^2 from the models
+  mod.max = rsq.max = list()
+  for(i in names(mod))
+  mod.max[[i]] = lapply(mod[[i]], function(x) summary(x)$r.squared)
+
+  #Find the position highest R^2 
+  #This for each element in the imcompletes set
+  mod.which = lapply(mod.max, which.max)
+  mod.new = mod
+
+  #Get the names so the output retains the correct label
+  names.max = names(unlist(mod.which))
+
+  #Subset the models by the highest R^2 and give the correct names
+  for(i in names(mod))
+    mod.new[[i]] = mod[[i]][[mod.which[[i]]]]
+  names(mod.new) = names.max
+
+  #Keep the value of the highest R^2 to report them
+  for(i in names(mod.max))
+  rsq.max[[i]] = mod.max[[i]][[mod.which[[i]]]]
+	
+	
+  ####Impute the data using the best linear fit
+
+  #Extract the coefficients
+  mod.coef = lapply(mod.new, function(x) x$coefficients)
+
+  #Get the names from the completes that we are keeping
+  names.subset = unlist(lapply(strsplit(names.max, "\\."), function(x) x[[2]]))
+
+  #Drop the complete variables we are not still using
+  data.for.impute = data.frame(new.complete)[,names.subset]
+
+  #Impute the data
+  mod.coef.in = list()
+  nn = length(mod.coef)
+  for(i in 1:nn)
+    mod.coef.in[[i]] = cbind(1, data.for.impute[,i])%*%mod.coef[[i]]
+
+  #Replace missing values with imputed data
+  #Record the number of missing values to report it
+  new.incomplete.in = new.incomplete
+  n.missing = NULL
+  for(i in 1:nn)
+  {
+    nan = is.na(new.incomplete[[i]])
+    n.missing[i] = sum(nan)
+    new.incomplete.in[[i]][nan] = mod.coef.in[[i]][nan]
+  }
+	
+
+  ###Return the data to its original format
+	
+  my.data.in = my.data
+  data.in = data
+
+  #Sometimes negative values do not make theoretical sense.
+  #The model, however, might give negative values.
+  #We replace them with what the user specifies
+  if(no.negs) for(i in names(new.incomplete.in))
+    new.incomplete.in[[i]][new.incomplete.in[[i]] < 0] = 0
+	
+  #Go from list to a vector with all the values 
+  my.data.in$Value[my.data.in$Name %in% names(new.incomplete.in)] = 
+    unlist(new.incomplete.in)
+  
+  #Subset the vector by each variable
+  #Put it in the correct column in a data.frame
+  for(i in names(vars))
+    data.in[,i] = my.data.in$Value[as.character(my.data.in$Variable) %in% i]
+
+  ####Give the output
+	
+  L = list(sep = sep,
+    imputed.names = names.max, 
+    imputed.rsq = unlist(rsq.max), 
+    n.missing = n.missing, 
+    completes.list = new.complete, 
+    incompletes.list = new.incomplete, 
+    imputed.incompletes.list = new.incomplete.in, 
+    riginal.data = data, 
+    imputed.data = data.in)
+
+  #Create a class so we can specify print, plot, summary, etc. methods
+  class(L) = c("my.impute", class(L))
+	
+  #Give the output
+  L
+}
+
+print.my.impute = function(x) print(x$imputed.data)
+
+summary.my.impute = function(x)
+{
+	#Get the names of the variables cross the subjects in ID that had NAs
+	name = strsplit(x$imputed.names, ".")
+	elements = lapply(name, function(y) strsplit(y, x$sep))
+	
+	#Create objects to be used
+	ee2 = list()
+	nn = NULL
+
+	#Report the R^2, number of missing values, and the imputed data
+	for(i in 1:length(name))
+	{
+	e1 = elements[[i]][[1]]
+	e2 = elements[[i]][[2]]
+	nn[i] = paste(e1[2], e1[3], "regressed v", e2[2], e2[3])
+	
+	ee = list(c("N Missing" = x$n.missing[i], 
+	"Fit Rsq" = unname(x$imputed.rsq[i])),
+	x$incompletes.list[[i]], 
+	x$imputed.incompletes.list[[i]], 
+	x$completes.list[[i]])
+	
+	ee2[[i]] = ee
+	}
+	
+	#Change the names
+	names(ee2) = nn
+	for(i in 1:length(ee2)) names(ee2[[i]]) = c("Summary", "Original", "Imputed","Data used to impute")
+	
+	#Give the summary
+	ee2
+}
